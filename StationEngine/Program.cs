@@ -43,7 +43,7 @@ public partial class Program
         {
             Console.Error.WriteLine($"StationEngine: {ex.Message}");
             Console.Error.WriteLine(
-                "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>] [--bind <ip>]");
+                "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>] [--bind <ip>] [--webroot <path>]");
             diagnosticLogFileSink.Dispose();
             return 2;
         }
@@ -196,6 +196,17 @@ public partial class Program
 
         var app = builder.Build();
         app.UseCors(CorsPolicyName);
+        if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
+        {
+            app.UseStaticFiles(new StaticFileOptions
+            {
+                OnPrepareResponse = ctx =>
+                {
+                    ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                }
+            });
+            app.MapFallbackToFile("index.html");
+        }
         app.UseStationAccessTokenAuthorization(
             Environment.GetEnvironmentVariable(StationAccessTokenEnvironmentVariable));
         app.UseWebSockets(new WebSocketOptions
@@ -217,6 +228,7 @@ public partial class Program
         int? port = null;
         bool? nativeAudioOutputEnabled = null;
         string? bindAddress = null;
+        string? webRoot = null;
         for (var index = 0; index < args.Count; index++)
         {
             switch (args[index])
@@ -253,13 +265,15 @@ public partial class Program
         return new StationEngineCommandLineOptions(
             Port: port ?? throw new ArgumentException("--port is required"),
             NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false,
-            BindAddress: bindAddress ?? "127.0.0.1");
+            BindAddress: bindAddress ?? "127.0.0.1",
+            WebRoot: webRoot);
     }
 
     private sealed record StationEngineCommandLineOptions(
         int Port,
         bool NativeAudioOutputEnabled,
-        string BindAddress = "127.0.0.1");
+        string BindAddress = "127.0.0.1",
+        string? WebRoot = null);
 
     private static void PrepareEnginePreferences()
     {
