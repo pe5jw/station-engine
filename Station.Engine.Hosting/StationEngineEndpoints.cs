@@ -11,6 +11,7 @@ namespace Zeus.Server;
 /// <summary>Maps the standalone station engine's HTTP and WebSocket surface.</summary>
 public static class StationEngineEndpoints
 {
+    // Modified by PE5JW 2026: removed zeussdr.com remote origins; localhost only.
     internal static readonly HashSet<string> AllowedBrowserOrigins = new(StringComparer.Ordinal)
     {
         "https://app.zeussdr.com",
