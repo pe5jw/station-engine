@@ -43,7 +43,7 @@ public partial class Program
         {
             Console.Error.WriteLine($"StationEngine: {ex.Message}");
             Console.Error.WriteLine(
-                "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>]");
+                "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>] [--bind <ip>]");
             diagnosticLogFileSink.Dispose();
             return 2;
         }
@@ -159,7 +159,7 @@ public partial class Program
             options.ShutdownTimeout = TimeSpan.FromSeconds(3));
         builder.WebHost.ConfigureKestrel(options =>
         {
-            options.Listen(IPAddress.Loopback, port);
+            options.Listen(System.Net.IPAddress.Parse(cmdLineOptions.BindAddress), port);
             options.ConfigureTciListener(tciEnabled, tciBindAddress, tciPort);
         });
 
@@ -216,6 +216,7 @@ public partial class Program
     {
         int? port = null;
         bool? nativeAudioOutputEnabled = null;
+        string? bindAddress = null;
         for (var index = 0; index < args.Count; index++)
         {
             switch (args[index])
@@ -240,18 +241,25 @@ public partial class Program
                     nativeAudioOutputEnabled = enabled;
                     break;
                 default:
+                case "--bind":
+                    if (++index >= args.Count)
+                        throw new ArgumentException("--bind requires an IP address");
+                    bindAddress = args[index];
+                    break;
                     throw new ArgumentException($"unknown argument '{args[index]}'");
             }
         }
 
         return new StationEngineCommandLineOptions(
             Port: port ?? throw new ArgumentException("--port is required"),
-            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false);
+            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false,
+            BindAddress: bindAddress ?? "127.0.0.1");
     }
 
     private sealed record StationEngineCommandLineOptions(
         int Port,
-        bool NativeAudioOutputEnabled);
+        bool NativeAudioOutputEnabled,
+        string BindAddress = "127.0.0.1");
 
     private static void PrepareEnginePreferences()
     {

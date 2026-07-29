@@ -54,7 +54,19 @@ public static class StationEngineEndpoints
         if (AllowedBrowserOrigins.Contains(origin)) return true;
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
         if (uri.Scheme != Uri.UriSchemeHttp) return false;
-        return uri.Host is "127.0.0.1" or "localhost" or "[::1]" or "::1";
+        // Allow loopback and any private LAN IP (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+        if (uri.Host is "127.0.0.1" or "localhost" or "[::1]" or "::1") return true;
+        if (uri.HostNameType == UriHostNameType.IPv4)
+        {
+            var parts = uri.Host.Split('.');
+            if (parts.Length == 4 && int.TryParse(parts[0], out var a))
+            {
+                if (a == 10) return true;
+                if (a == 192 && parts[1] == "168") return true;
+                if (a == 172 && int.TryParse(parts[1], out var b) && b >= 16 && b <= 31) return true;
+            }
+        }
+        return false;
     }
 
     public static IEndpointRouteBuilder MapStationEngineEndpoints(
