@@ -107,8 +107,8 @@ public partial class Program
     public static WebApplication Build(string[] args, DiagnosticLogFileSink? diagnosticLogFileSink)
     {
         var options = ParseOptions(args);
-        var port = options.Port;
-        PrepareEnginePreferences();
+        var cmdLineOptions = ParseOptions(args);
+        var port = cmdLineOptions.Port;
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -192,7 +192,7 @@ public partial class Program
             CorsPolicyName,
             StationEngineEndpoints.ConfigureCors));
         builder.Services.AddStationEngine(new StationEngineHostingOptions(
-            NativeAudioOutputEnabled: options.NativeAudioOutputEnabled));
+            NativeAudioOutputEnabled: cmdLineOptions.NativeAudioOutputEnabled));
 
         var app = builder.Build();
         app.UseCors(CorsPolicyName);
