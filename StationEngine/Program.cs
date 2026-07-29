@@ -114,8 +114,9 @@ public partial class Program
         {
             Args = args,
             ContentRootPath = AppContext.BaseDirectory,
-        });
+            WebRootPath = string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot) ? null : cmdLineOptions.WebRoot,
 
+        });
         // Self-diagnostic log capture, mirroring the product host (ZeusHost): a
         // singleton ring buffer retains the last ~1000 formatted log lines and a
         // rolling on-disk sink mirrors the same redacted lines to
@@ -157,10 +158,10 @@ public partial class Program
         });
         builder.Services.Configure<Microsoft.Extensions.Hosting.HostOptions>(options =>
             options.ShutdownTimeout = TimeSpan.FromSeconds(3));
+        var bindIp = System.Net.IPAddress.Parse(cmdLineOptions.BindAddress);
         builder.WebHost.ConfigureKestrel(options =>
         {
-            options.Listen(System.Net.IPAddress.Parse(cmdLineOptions.BindAddress), port);
-            options.ConfigureTciListener(tciEnabled, tciBindAddress, tciPort);
+            options.Listen(bindIp, port);
         });
 
         builder.Services.Configure<JsonOptions>(options =>
@@ -247,12 +248,17 @@ public partial class Program
                             "--native-audio-output requires true or false");
                     nativeAudioOutputEnabled = enabled;
                     break;
-                default:
                 case "--bind":
                     if (++index >= args.Count)
                         throw new ArgumentException("--bind requires an IP address");
                     bindAddress = args[index];
                     break;
+                case "--webroot":
+                    if (++index >= args.Count)
+                        throw new ArgumentException("--webroot requires a path");
+                    webRoot = args[index];
+                    break;
+                default:
                     throw new ArgumentException($"unknown argument '{args[index]}'");
             }
         }
