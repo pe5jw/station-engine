@@ -198,15 +198,10 @@ public partial class Program
         app.UseCors(CorsPolicyName);
         if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
         {
-            app.UseStaticFiles(new StaticFileOptions
-            {
-                OnPrepareResponse = ctx =>
-                {
-                    ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
-                }
-            });
+            app.UseStaticFiles();
             app.MapFallbackToFile("index.html");
         }
+        if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
         app.UseStationAccessTokenAuthorization(
             Environment.GetEnvironmentVariable(StationAccessTokenEnvironmentVariable));
         app.UseWebSockets(new WebSocketOptions
