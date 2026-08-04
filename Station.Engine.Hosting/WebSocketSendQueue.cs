@@ -18,6 +18,7 @@ internal enum SendQueueChange
     Enqueued,
     Coalesced,
     DroppedOldest,
+    DroppedIncoming,
     Completed,
 }
 
@@ -28,8 +29,9 @@ internal readonly record struct SendQueueResult(
 /// <summary>
 /// Bounded multi-producer/single-consumer websocket queue. Display frames are
 /// full snapshots, so a newer snapshot replaces the queued snapshot for the
-/// same receiver stream in place. All other writes retain FIFO/drop-oldest
-/// behaviour.
+/// same receiver stream in place. When full, high-rate telemetry is discarded
+/// before control-plane frames so chat and state edges are not displaced by
+/// audio, display, or meter traffic.
 /// </summary>
 internal sealed class WebSocketSendQueue
 {
@@ -68,8 +70,13 @@ internal sealed class WebSocketSendQueue
             MsgType? droppedType = null;
             if (_items.Count == _capacity)
             {
-                droppedType = FrameType(_items.First!.Value);
-                _items.RemoveFirst();
+                var discardable = FindOldestDiscardable();
+                if (discardable is null && IsDiscardable(payload))
+                    return new(SendQueueChange.DroppedIncoming, FrameType(payload));
+
+                var dropped = discardable ?? _items.First!;
+                droppedType = FrameType(dropped.Value);
+                _items.Remove(dropped);
             }
 
             _items.AddLast(payload);
@@ -111,6 +118,28 @@ internal sealed class WebSocketSendQueue
         }
     }
 
+    public int RemoveType(MsgType type)
+    {
+        int removed = 0;
+        lock (_sync)
+        {
+            for (var node = _items.First; node is not null;)
+            {
+                var next = node.Next;
+                if (FrameType(node.Value) == type)
+                {
+                    _items.Remove(node);
+                    removed++;
+                    // Keep the semaphore count aligned when the consumer has
+                    // not already claimed this item's permit.
+                    _available.Wait(0);
+                }
+                node = next;
+            }
+        }
+        return removed;
+    }
+
     internal IReadOnlyList<byte[]> Snapshot()
     {
         lock (_sync) return _items.ToArray();
@@ -118,6 +147,29 @@ internal sealed class WebSocketSendQueue
 
     private static MsgType? FrameType(byte[] payload) =>
         payload.Length == 0 ? null : (MsgType)payload[0];
+
+    private LinkedListNode<byte[]>? FindOldestDiscardable()
+    {
+        for (var node = _items.First; node is not null; node = node.Next)
+        {
+            if (IsDiscardable(node.Value)) return node;
+        }
+
+        return null;
+    }
+
+    private static bool IsDiscardable(byte[] payload) => FrameType(payload) is
+        MsgType.DisplayFrame or
+        MsgType.AudioPcm or
+        MsgType.TxMeters or
+        MsgType.TxMetersV2 or
+        MsgType.PsMeters or
+        MsgType.RxMeter or
+        MsgType.RxMetersV2 or
+        MsgType.PaTemp or
+        MsgType.MicPeak or
+        MsgType.NativeMicPcm or
+        MsgType.DiagnosticsHealth;
 
     private static bool TryGetDisplayStream(byte[] payload, out byte stream)
     {

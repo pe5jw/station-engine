@@ -6,12 +6,20 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Zeus.Contracts;
+using Zeus.Hosting;
 using Zeus.Server;
 using Zeus.Server.Cat;
 using Zeus.Server.Diagnostics;
 using Zeus.Server.Tci;
+using Zeus.Plugins.Host;
 
 namespace Zeus.StationEngine;
+
+internal enum StationEngineBindMode
+{
+    Loopback,
+    Lan,
+}
 
 public partial class Program
 {
@@ -43,7 +51,13 @@ public partial class Program
         {
             Console.Error.WriteLine($"StationEngine: {ex.Message}");
             Console.Error.WriteLine(
+<<<<<<< HEAD
                 "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>] [--bind <ip>] [--webroot <path>]");
+=======
+                "usage: StationEngine --port <1..65535> [--bind <loopback|lan>] " +
+                "[--lan-https-port <1..65535> --product-lan-https-port <1..65535>] " +
+                "[--native-audio-output <true|false>]");
+>>>>>>> upstream/main
             diagnosticLogFileSink.Dispose();
             return 2;
         }
@@ -107,8 +121,25 @@ public partial class Program
     public static WebApplication Build(string[] args, DiagnosticLogFileSink? diagnosticLogFileSink)
     {
         var options = ParseOptions(args);
+<<<<<<< HEAD
         var cmdLineOptions = ParseOptions(args);
         var port = cmdLineOptions.Port;
+=======
+        var port = options.Port;
+        var lanCertificate = options.LanHttpsPort is not null
+            ? LanCertificate.GetOrCreate()
+            : null;
+        var lanHttpsUrls = options.LanHttpsPort is { } lanHttpsPort
+            && options.ProductLanHttpsPort is { } productLanHttpsPort
+            ? LanCertificate.GetLanIps()
+                .Select(address =>
+                    $"https://{address}:{productLanHttpsPort}/?attach=local" +
+                    $"&port={lanHttpsPort}&productPort={productLanHttpsPort}" +
+                    "&transport=https")
+                .ToArray()
+            : Array.Empty<string>();
+        PrepareEnginePreferences();
+>>>>>>> upstream/main
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -118,7 +149,7 @@ public partial class Program
 
         });
         // Self-diagnostic log capture, mirroring the product host (ZeusHost): a
-        // singleton ring buffer retains the last ~1000 formatted log lines and a
+        // singleton ring buffer retains the last ~4000 formatted log lines and a
         // rolling on-disk sink mirrors the same redacted lines to
         // DataDir/logs/zeus-app.log so the recent log SURVIVES an engine crash —
         // a Zeus Link tester whose engine dies before the panadapter paints
@@ -158,10 +189,22 @@ public partial class Program
         });
         builder.Services.Configure<Microsoft.Extensions.Hosting.HostOptions>(options =>
             options.ShutdownTimeout = TimeSpan.FromSeconds(3));
+<<<<<<< HEAD
         var bindIp = System.Net.IPAddress.Parse(cmdLineOptions.BindAddress);
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.Listen(bindIp, port);
+=======
+        builder.WebHost.ConfigureKestrel(server =>
+        {
+            if (ListenOnAllInterfaces(options.BindMode, options.LanHttpsPort))
+                server.ListenAnyIP(port);
+            else
+                server.Listen(IPAddress.Loopback, port);
+            if (options.LanHttpsPort is { } httpsPort && lanCertificate is not null)
+                server.ListenAnyIP(httpsPort, listener => listener.UseHttps(lanCertificate));
+            server.ConfigureTciListener(tciEnabled, tciBindAddress, tciPort);
+>>>>>>> upstream/main
         });
 
         builder.Services.Configure<JsonOptions>(options =>
@@ -189,13 +232,49 @@ public partial class Program
                 options.AutoReport = pendingCat.AutoReport;
             });
         }
-        builder.Services.AddCors(options => options.AddPolicy(
+        var httpContextAccessor = new HttpContextAccessor();
+        builder.Services.AddSingleton<IHttpContextAccessor>(httpContextAccessor);
+        builder.Services.AddCors(cors => cors.AddPolicy(
             CorsPolicyName,
-            StationEngineEndpoints.ConfigureCors));
+            policy => StationEngineEndpoints.ConfigureCors(
+                policy,
+                allowLanSameHost: ListenOnAllInterfaces(
+                    options.BindMode,
+                    options.LanHttpsPort),
+                allowLanHttpsSameHost: options.LanHttpsPort is not null,
+                requestHost: () => httpContextAccessor.HttpContext?.Request.Host.Host)));
+        var p2AutoConnectEndpoint = Environment.GetEnvironmentVariable(
+            P2AutoConnectService.EndpointEnvironmentVariable);
         builder.Services.AddStationEngine(new StationEngineHostingOptions(
+<<<<<<< HEAD
             NativeAudioOutputEnabled: cmdLineOptions.NativeAudioOutputEnabled));
+=======
+            NativeAudioOutputEnabled: options.NativeAudioOutputEnabled,
+            P2AutoConnectEndpoint: string.IsNullOrWhiteSpace(p2AutoConnectEndpoint)
+                ? null
+                : p2AutoConnectEndpoint,
+            LanHttpsUrls: lanHttpsUrls));
+        builder.Services.AddZeusPlugins(
+            prefsDbPathProvider: PrefsDbPath.EngineGet,
+            options: new PluginManagerOptions
+            {
+                HostDataDirectory = Path.GetDirectoryName(PrefsDbPath.LogbookPath()),
+                PluginRoot = StationFeaturePluginRoot(),
+            });
+        // The later registration intentionally replaces the engine's inert
+        // fallback so optional hardware behavior follows the live plugin
+        // activation state, including uninstall/deactivation without restart.
+        builder.Services.AddSingleton<IInstalledFeatureState, PluginFeatureState>();
+>>>>>>> upstream/main
 
         var app = builder.Build();
+        if (options.BindMode == StationEngineBindMode.Lan && options.LanHttpsPort is null)
+        {
+            app.Logger.LogInformation(
+                "station-engine --bind lan opens only the HTTP engine listener; " +
+                "TCI and CAT retain their separately configured bind addresses " +
+                "(default loopback)");
+        }
         app.UseCors(CorsPolicyName);
         if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
         {
@@ -205,6 +284,7 @@ public partial class Program
         if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
         app.UseStationAccessTokenAuthorization(
             Environment.GetEnvironmentVariable(StationAccessTokenEnvironmentVariable));
+        app.Use(RejectRemotePluginMutations);
         app.UseWebSockets(new WebSocketOptions
         {
             KeepAliveInterval = TimeSpan.FromSeconds(20),
@@ -213,15 +293,51 @@ public partial class Program
 
         AnchorWdspDataFiles(app);
         WireEngineBroadcasts(app);
-        app.MapStationEngineEndpoints();
+        app.MapStationEngineEndpoints(
+            allowLanSameHost: ListenOnAllInterfaces(
+                options.BindMode,
+                options.LanHttpsPort),
+            allowLanHttpsSameHost: options.LanHttpsPort is not null);
+        var pluginManager = app.Services.GetRequiredService<PluginManager>();
+        pluginManager.StartAsync(default).GetAwaiter().GetResult();
+        PluginEndpoints.MapAll(app, pluginManager);
         return app;
+    }
+
+    internal static async Task RejectRemotePluginMutations(
+        HttpContext context,
+        RequestDelegate next)
+    {
+        var path = context.Request.Path;
+        var pathText = path.Value ?? string.Empty;
+        var mutatesPluginState = path.StartsWithSegments("/api/plugins/install")
+            || string.Equals(pathText, "/api/plugins/checkout", StringComparison.OrdinalIgnoreCase)
+            || (HttpMethods.IsDelete(context.Request.Method)
+                && pathText.StartsWith("/api/plugins/", StringComparison.OrdinalIgnoreCase)
+                && pathText.Count(character => character == '/') == 3);
+        var remoteAddress = context.Connection.RemoteIpAddress;
+        if (mutatesPluginState
+            && (remoteAddress is null || !IPAddress.IsLoopback(remoteAddress)))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = "Plugin installation and removal are available only from this station computer.",
+            }).ConfigureAwait(false);
+            return;
+        }
+
+        await next(context).ConfigureAwait(false);
     }
 
     internal static int ParsePort(IReadOnlyList<string> args) => ParseOptions(args).Port;
 
-    private static StationEngineCommandLineOptions ParseOptions(IReadOnlyList<string> args)
+    internal static StationEngineCommandLineOptions ParseOptions(IReadOnlyList<string> args)
     {
         int? port = null;
+        int? lanHttpsPort = null;
+        int? productLanHttpsPort = null;
+        StationEngineBindMode? bindMode = null;
         bool? nativeAudioOutputEnabled = null;
         string? bindAddress = null;
         string? webRoot = null;
@@ -238,6 +354,39 @@ public partial class Program
                         throw new ArgumentException(
                             "--port requires an integer from 1 through 65535");
                     port = parsed;
+                    break;
+                case "--lan-https-port":
+                    if (lanHttpsPort is not null)
+                        throw new ArgumentException("--lan-https-port may be specified only once");
+                    if (++index >= args.Count
+                        || !int.TryParse(args[index], out var parsedHttpsPort)
+                        || parsedHttpsPort is < 1 or > 65_535)
+                        throw new ArgumentException(
+                            "--lan-https-port requires an integer from 1 through 65535");
+                    lanHttpsPort = parsedHttpsPort;
+                    break;
+                case "--product-lan-https-port":
+                    if (productLanHttpsPort is not null)
+                        throw new ArgumentException(
+                            "--product-lan-https-port may be specified only once");
+                    if (++index >= args.Count
+                        || !int.TryParse(args[index], out var parsedProductHttpsPort)
+                        || parsedProductHttpsPort is < 1 or > 65_535)
+                        throw new ArgumentException(
+                            "--product-lan-https-port requires an integer from 1 through 65535");
+                    productLanHttpsPort = parsedProductHttpsPort;
+                    break;
+                case "--bind":
+                    if (bindMode is not null)
+                        throw new ArgumentException("--bind may be specified only once");
+                    if (++index >= args.Count)
+                        throw new ArgumentException("--bind requires loopback or lan");
+                    bindMode = args[index] switch
+                    {
+                        "loopback" => StationEngineBindMode.Loopback,
+                        "lan" => StationEngineBindMode.Lan,
+                        _ => throw new ArgumentException("--bind requires loopback or lan"),
+                    };
                     break;
                 case "--native-audio-output":
                     if (nativeAudioOutputEnabled is not null)
@@ -263,18 +412,53 @@ public partial class Program
             }
         }
 
+        var resolvedPort = port ?? throw new ArgumentException("--port is required");
+        var resolvedBindMode = bindMode ?? StationEngineBindMode.Loopback;
+        if ((lanHttpsPort is null) != (productLanHttpsPort is null))
+            throw new ArgumentException(
+                "--lan-https-port and --product-lan-https-port must be specified together");
+        if (lanHttpsPort is not null && resolvedBindMode != StationEngineBindMode.Lan)
+            throw new ArgumentException("LAN HTTPS ports require --bind lan");
+        if (lanHttpsPort == resolvedPort)
+            throw new ArgumentException("--lan-https-port must differ from --port");
+        if (productLanHttpsPort == resolvedPort)
+            throw new ArgumentException("--product-lan-https-port must differ from --port");
+        if (lanHttpsPort is not null && lanHttpsPort == productLanHttpsPort)
+            throw new ArgumentException(
+                "--lan-https-port must differ from --product-lan-https-port");
+
         return new StationEngineCommandLineOptions(
+<<<<<<< HEAD
             Port: port ?? throw new ArgumentException("--port is required"),
             NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false,
             BindAddress: bindAddress ?? "127.0.0.1",
             WebRoot: webRoot);
+=======
+            Port: resolvedPort,
+            BindMode: resolvedBindMode,
+            LanHttpsPort: lanHttpsPort,
+            ProductLanHttpsPort: productLanHttpsPort,
+            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false);
+>>>>>>> upstream/main
     }
 
-    private sealed record StationEngineCommandLineOptions(
+    internal static bool ListenOnAllInterfaces(
+        StationEngineBindMode bindMode,
+        int? lanHttpsPort = null) =>
+        bindMode == StationEngineBindMode.Lan && lanHttpsPort is null;
+
+    internal sealed record StationEngineCommandLineOptions(
         int Port,
+<<<<<<< HEAD
         bool NativeAudioOutputEnabled,
         string BindAddress = "127.0.0.1",
         string? WebRoot = null);
+=======
+        StationEngineBindMode BindMode,
+        int? LanHttpsPort,
+        int? ProductLanHttpsPort,
+        bool NativeAudioOutputEnabled);
+>>>>>>> upstream/main
 
     private static void PrepareEnginePreferences()
     {
@@ -285,6 +469,18 @@ public partial class Program
         var productPath = PrefsDbPath.Get();
         EnginePrefsDbMigration.RunIfNeeded(productPath, enginePath);
         AudioDevicePrefsMigration.RunIfNeeded(productPath, enginePath);
+    }
+
+    private static string StationFeaturePluginRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable(PluginRoot.EnvVar);
+        if (!string.IsNullOrWhiteSpace(configured))
+            return configured;
+
+        var desktopPluginRoot = PluginRoot.DefaultPath();
+        var zeusDataDirectory = Path.GetDirectoryName(desktopPluginRoot)
+            ?? throw new InvalidOperationException("Could not resolve the Zeus data directory.");
+        return Path.Combine(zeusDataDirectory, "features");
     }
 
     private static TciRuntimeConfig? LoadPersistedTci()

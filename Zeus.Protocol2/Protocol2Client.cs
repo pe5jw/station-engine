@@ -131,15 +131,36 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
 
     // Protocol-2 wideband ADC snapshots arrive on source ports 1027..1034.
     // CmdGeneral below enables ADC0 only for the display mode; the firmware
-    // emits frame-local sequence numbers 0..WidebandPacketsPerFrame-1.
+    // emits frame-local sequence numbers 0..profile.PacketsPerFrame-1.
     private const int WidebandDataPortBase = 1027;
     private const int WidebandAdcCount = 8;
-    public const int WidebandSamplesPerPacket = 512;
-    public const int WidebandPacketsPerFrame = 32;
-    public const int WidebandFrameSamples = WidebandSamplesPerPacket * WidebandPacketsPerFrame;
+    public const int ClassicWidebandSamplesPerPacket = 512;
+    public const int ClassicWidebandPacketsPerFrame = 32;
+    public const int ClassicWidebandFrameSamples =
+        ClassicWidebandSamplesPerPacket * ClassicWidebandPacketsPerFrame;
+    // Saturn's wideband FIFO is 8,192 x 64-bit words. Its firmware requests
+    // eight extra words around each capture, leaving 8,184 words (32,736
+    // int16 samples) for useful ADC data. 528 samples x 62 packets consumes
+    // that capacity exactly and produces 1,060-byte UDP payloads, comfortably
+    // below the Ethernet MTU after IPv4/UDP headers are added.
+    public const int SaturnWidebandSamplesPerPacket = 528;
+    public const int SaturnWidebandPacketsPerFrame = 62;
+    public const int SaturnWidebandFrameSamples =
+        SaturnWidebandSamplesPerPacket * SaturnWidebandPacketsPerFrame;
+    public const int WidebandMaxFrameSamples = SaturnWidebandFrameSamples;
     public const int WidebandAdcSampleRateHz = 122_880_000;
-    private const int WidebandPayloadBytes = WidebandSamplesPerPacket * sizeof(short);
     private const byte WidebandUpdateRateMs = 100;
+
+    internal readonly record struct WidebandCaptureGeometry(int SamplesPerPacket, int PacketsPerFrame)
+    {
+        public int FrameSamples => SamplesPerPacket * PacketsPerFrame;
+        public int PayloadBytes => SamplesPerPacket * sizeof(short);
+    }
+
+    private static readonly WidebandCaptureGeometry ClassicWidebandGeometry =
+        new(ClassicWidebandSamplesPerPacket, ClassicWidebandPacketsPerFrame);
+    private static readonly WidebandCaptureGeometry SaturnWidebandGeometry =
+        new(SaturnWidebandSamplesPerPacket, SaturnWidebandPacketsPerFrame);
 
     // Hermes-class radios (Brick2 is the live consumer) use a single ADC
     // and have no PureSignal feedback DDCs reserved at the front of the pool.
@@ -166,6 +187,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
 
     private Socket? _sock;
     private Action<byte[]>? _cmdHighPrioritySinkForTesting;
+    private Action<int, byte[]>? _commandSinkForTesting;
     private IPEndPoint? _radioEndpoint;
     private CancellationTokenSource? _rxCts;
     private Task? _rxTask;
@@ -571,8 +593,15 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     internal void SetCmdHighPrioritySinkForTesting(Action<byte[]>? sink) =>
         _cmdHighPrioritySinkForTesting = sink;
 
+    // Socketless capture of the four command destinations. Kept separate from
+    // the older high-priority-only seam so existing service tests stay focused.
+    internal void SetCommandSinkForTesting(Action<int, byte[]>? sink) =>
+        _commandSinkForTesting = sink;
+
     private bool CanSendCmdHighPriority =>
-        _rxTask is not null || _cmdHighPrioritySinkForTesting is not null;
+        _rxTask is not null
+        || _cmdHighPrioritySinkForTesting is not null
+        || _commandSinkForTesting is not null;
 
     public ChannelReader<IqFrame> IqFrames => _iqFrames.Reader;
     public long TotalFrames => Interlocked.Read(ref _totalFrames);
@@ -635,7 +664,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     // hand it off synchronously. The handler must copy before returning.
     private volatile WidebandFrameHandler? _widebandFrameHandler;
     private volatile bool _widebandDisplayEnabled;
-    private readonly short[] _widebandFrameSamples = new short[WidebandFrameSamples];
+    private readonly short[] _widebandFrameSamples = new short[WidebandMaxFrameSamples];
     private int _widebandPacketIndex;
     private uint _widebandExpectedSeq;
     private bool _widebandCollecting;
@@ -741,7 +770,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     /// Start. Diagnostic — lets the operator confirm the radio is actually
     /// publishing PA telemetry, separately from whether the watts math
     /// looks right. Read by the 1 Hz log line in
-    /// <see cref="RxLoop(System.Threading.CancellationToken)"/>.
+    /// <see cref="RxLoop"/>.
     /// </summary>
     public long HiPriPacketCount => Interlocked.Read(ref _hiPriPackets);
     private long _hiPriPackets;
@@ -828,22 +857,9 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
             PrimeMacOSUdpRoute(_radioEndpoint!.Address, _log);
         }
 
-        // Startup sequence matches Thetis SendStart() and Priapus/NextGenSDR:
-        // CmdGeneral → CmdRx → CmdTx → CmdHighPriority(run=1). Skipping CmdTx
-        // leaves the G2 MkII in a half-configured state where its BPF board
-        // latches a random band instead of honouring CmdHighPriority filter
-        // bits on subsequent tunes.
-        ct.ThrowIfCancellationRequested();
-        SendCmdGeneral();
-        Thread.Sleep(50);
-        ct.ThrowIfCancellationRequested();
-        SendCmdRx();
-        Thread.Sleep(50);
-        ct.ThrowIfCancellationRequested();
-        SendCmdTx();
-        Thread.Sleep(50);
-        ct.ThrowIfCancellationRequested();
-        SendCmdHighPriority(run: true);
+        long preclearTicks = SendStartCommandSequence(ct, settleDelayMs: 50);
+        long streamStartTicks = _stopwatch.ElapsedTicks;
+        _log.LogInformation("p2.start rate={Rate}kHz freq={Freq}Hz", _sampleRateKhz, _rxFreqHz);
 
         // The request token gates startup calls above, not the live session.
         // Linking to HttpContext.RequestAborted lets a browser navigation stop
@@ -859,7 +875,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         // average pkts/s looks fine but the sub-block jitter starves the radio
         // TX FIFO → dirty two-tone. Clean in web (separate processes) without it.
         _rxTask = Task.Factory.StartNew(
-            () => RxLoop(_rxCts.Token),
+            () => RxLoop(_rxCts.Token, streamStartTicks, preclearTicks),
             _rxCts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         _keepaliveTask = Task.Run(() => KeepaliveLoop(_rxCts.Token));
         // Paced TX IQ sender — drains the queue FlushTxIqLocked fills and
@@ -869,9 +885,41 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         _txIqSenderTask = Task.Factory.StartNew(
             () => TxIqSenderLoop(_rxCts.Token),
             _rxCts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-        _log.LogInformation("p2.start rate={Rate}kHz freq={Freq}Hz", _sampleRateKhz, _rxFreqHz);
         return Task.CompletedTask;
     }
+
+    private long SendStartCommandSequence(CancellationToken ct, int settleDelayMs)
+    {
+        // Protocol-2 gateware holds the stream destination while run=1. In
+        // docs/references/firmware/hermes/P2-gateware/Hermes_Protocol_2_v10.7/
+        // Ethernet/network.v, the `if (!run)` block is the only place that
+        // refreshes run_destination_ip/mac/port. Clear run before configuration
+        // so a new session re-latches this socket instead of the previous one.
+        ct.ThrowIfCancellationRequested();
+        SendCmdHighPriority(run: false);
+        long preclearTicks = _stopwatch.ElapsedTicks;
+        Thread.Sleep(settleDelayMs);
+
+        // Startup configuration order matches Thetis SendStart() and
+        // Priapus/NextGenSDR. Skipping CmdTx leaves the G2 MkII in a
+        // half-configured state where its BPF board latches a random band
+        // instead of honouring CmdHighPriority filter bits on later tunes.
+        ct.ThrowIfCancellationRequested();
+        SendCmdGeneral();
+        Thread.Sleep(settleDelayMs);
+        ct.ThrowIfCancellationRequested();
+        SendCmdRx();
+        Thread.Sleep(settleDelayMs);
+        ct.ThrowIfCancellationRequested();
+        SendCmdTx();
+        Thread.Sleep(settleDelayMs);
+        ct.ThrowIfCancellationRequested();
+        SendCmdHighPriority(run: true);
+        return preclearTicks;
+    }
+
+    internal void SendStartCommandSequenceForTest(CancellationToken ct) =>
+        SendStartCommandSequence(ct, settleDelayMs: 0);
 
     public async Task StopAsync(CancellationToken ct)
     {
@@ -1201,7 +1249,13 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     /// </summary>
     public void SetBoardKind(HpsdrBoardKind kind)
     {
+        var previousGeometry = WidebandGeometryFor(_boardKind, _variant);
         _boardKind = kind;
+        if (previousGeometry != WidebandGeometryFor(_boardKind, _variant))
+        {
+            ResetWidebandAssembler();
+            if (_rxTask is not null) SendCmdGeneral();
+        }
     }
 
     /// <summary>
@@ -1215,9 +1269,26 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     /// </summary>
     public void SetOrionMkIIVariant(OrionMkIIVariant variant)
     {
+        var previousGeometry = WidebandGeometryFor(_boardKind, _variant);
         _variant = variant;
-        if (_rxTask is not null) SendCmdHighPriority(run: true);
+        if (_rxTask is not null)
+        {
+            if (previousGeometry != WidebandGeometryFor(_boardKind, _variant))
+            {
+                ResetWidebandAssembler();
+                SendCmdGeneral();
+            }
+            SendCmdHighPriority(run: true);
+        }
     }
+
+    internal static WidebandCaptureGeometry WidebandGeometryFor(
+        HpsdrBoardKind board,
+        OrionMkIIVariant variant) =>
+        board == HpsdrBoardKind.OrionMkII &&
+        variant is OrionMkIIVariant.G2 or OrionMkIIVariant.G2_1K
+            ? SaturnWidebandGeometry
+            : ClassicWidebandGeometry;
 
     /// <summary>
     /// Per-board, per-sample-rate gain correction applied on top of the
@@ -2027,11 +2098,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         WriteBeU16(p, 17, 1035);
         WriteBeU16(p, 19, 1026);
         WriteBeU16(p, 21, WidebandDataPortBase);
-        p[23] = _widebandDisplayEnabled ? (byte)0x01 : (byte)0x00;
-        BinaryPrimitives.WriteUInt16BigEndian(p.AsSpan(24), WidebandSamplesPerPacket);
-        p[26] = 16;
-        p[27] = _widebandDisplayEnabled ? WidebandUpdateRateMs : (byte)0;
-        p[28] = WidebandPacketsPerFrame;
+        ComposeWidebandGeneralConfig(p, _widebandDisplayEnabled, _boardKind, _variant);
         // Matches pihpsdr new_protocol_general for ORION2/SATURN hardware.
         //
         // [37] = 0x08: pihpsdr writes this on ORION2/SATURN. The upstream
@@ -2054,7 +2121,33 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         // default; PaSettingsStore now owns the bit.
         p[58] = (byte)(_paEnabled ? 0x01 : 0x00);
         p[59] = 0x03;
-        _sock!.SendTo(p, new IPEndPoint(_radioEndpoint!.Address, 1024));
+        SendCommandPacket(p, 1024);
+    }
+
+    private void SendCommandPacket(byte[] packet, int destinationPort)
+    {
+        var testSink = _commandSinkForTesting;
+        if (testSink is not null)
+            testSink(destinationPort, packet);
+        else
+            _sock!.SendTo(packet, new IPEndPoint(_radioEndpoint!.Address, destinationPort));
+    }
+
+    internal static void ComposeWidebandGeneralConfig(
+        Span<byte> packet,
+        bool enabled,
+        HpsdrBoardKind board,
+        OrionMkIIVariant variant = OrionMkIIVariant.G2)
+    {
+        if (packet.Length < 29)
+            throw new ArgumentException("Protocol-2 general packet must contain bytes 23 through 28.", nameof(packet));
+
+        var geometry = WidebandGeometryFor(board, variant);
+        packet[23] = enabled ? (byte)0x01 : (byte)0x00;
+        BinaryPrimitives.WriteUInt16BigEndian(packet[24..], checked((ushort)geometry.SamplesPerPacket));
+        packet[26] = 16;
+        packet[27] = enabled ? WidebandUpdateRateMs : (byte)0;
+        packet[28] = checked((byte)geometry.PacketsPerFrame);
     }
 
     // macOS IP_BOUND_IF socket-option name. Defined in `netinet/in.h` as 25;
@@ -2287,7 +2380,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     /// Burn-zone interlock (PureSignal hard rule, issue #960). The G2E
     /// single-ADC time-multiplexed PS feedback path (compose + de-interleave,
     /// below) is fully wired but held DARK in production until BOTH coupled
-    /// pre-conditions land with KB2UKA sign-off:
+    /// pre-conditions land with maintainer sign-off:
     ///   (A) the byte-59 (Angelia_atten_Tx0) protective seed is pushed to the
     ///       wire on connect/arm in
     ///       <c>RadioService.ApplyPsHwPeakForConnection</c>. The single shared
@@ -2352,7 +2445,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     ///
     /// Flipping this true autonomously is forbidden — see CLAUDE.md
     /// "Hard Rules — PureSignal". The production flag flip and the final byte-59
-    /// seed value (<see cref="PsTxAdcProtectFloorDb"/>) require KB2UKA sign-off
+    /// seed value (<see cref="PsTxAdcProtectFloorDb"/>) require maintainer sign-off
     /// plus 10E bench verification of first-key-down ADC overload.
     /// </summary>
     /// <remarks>
@@ -2374,7 +2467,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
     /// on <c>FPGA_PTT</c> — <c>Hermes.v:1483</c>, <c>Tx_specific_C&amp;C.v:182-183</c>).
     /// 31 dB = the maximum (safest) attenuation, seeded so a fresh first key-down
     /// with PS armed cannot slam the coupler into the ADC at 0 dB. The final
-    /// production value is bench-cal pending and KB2UKA-gated.
+    /// production value is bench-cal pending and maintainer-gated.
     /// </summary>
     internal const byte PsTxAdcProtectFloorDb = 31;
 
@@ -2810,7 +2903,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
                 (byte)Volatile.Read(ref _rx2AdcSource),
                 (byte)Volatile.Read(ref _diversitySourceAdcSource));
         }
-        _sock!.SendTo(p, new IPEndPoint(_radioEndpoint!.Address, 1025));
+        SendCommandPacket(p, 1025);
     }
 
     private void SendCmdTx()
@@ -2831,7 +2924,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         // unchanged on the dual-ADC OrionMkII/Saturn/G2 family.
         bool psWire = ComposesPsFeedbackWire(_psFeedbackEnabled, _boardKind);
         var p = ComposeCmdTxBuffer(_seqCmdTx++, (ushort)_sampleRateKhz, _txStepAttnDb, _paEnabled, psWire, _micControl, _lineInGain, cw);
-        _sock!.SendTo(p, new IPEndPoint(_radioEndpoint!.Address, 1026));
+        SendCommandPacket(p, 1026);
     }
 
     /// <summary>
@@ -3251,11 +3344,14 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         }
         WriteBeU32(p, 1428, alex1);
         WriteBeU32(p, 1432, alex0);
-        var testSink = _cmdHighPrioritySinkForTesting;
-        if (testSink is not null)
-            testSink(p);
+        // The high-priority-only seam wins when it is the one installed; every
+        // other case (including the raw socket send) goes through the shared
+        // helper so the four command destinations keep a single send path.
+        var highPrioritySink = _cmdHighPrioritySinkForTesting;
+        if (highPrioritySink is not null && _commandSinkForTesting is null)
+            highPrioritySink(p);
         else
-            _sock!.SendTo(p, new IPEndPoint(_radioEndpoint!.Address, 1027));
+            SendCommandPacket(p, 1027);
 
         if (_cmdHpTxLogGate.ShouldLog(_stopwatch.ElapsedMilliseconds, run, moxOn, tuneActive))
         {
@@ -3566,6 +3662,39 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
             (ushort)(alex1 >> 16));
     }
 
+    /// <summary>
+    /// True when <paramref name="board"/> carries the classic Alex filter board
+    /// (RX high-pass filters) rather than the ANAN-7000 / Saturn band-pass board.
+    ///
+    /// The two generations reuse the same low Alex0 bits with different per-band
+    /// meanings, so selecting the wrong table can reject the tuned band. Thetis
+    /// <c>console.cs:setAlex1HPF</c> sends only OrionMkII, Saturn, and HermesC10
+    /// through its BPF path; pihpsdr <c>new_protocol.c</c> likewise reserves that
+    /// path for NEW_DEVICE_ORION2, NEW_DEVICE_SATURN, and NEW_DEVICE_G1, with its
+    /// default using the old ANAN-100/200 HPFs. The bit maps are documented
+    /// separately in pihpsdr <c>alex.h</c>.
+    ///
+    /// This is deliberately a POSITIVE allow-list, not the references' inverted
+    /// default — do NOT "simplify" it to
+    /// <c>board is not (OrionMkII or HermesC10)</c>. Two boards are intentionally
+    /// left on the ANAN-7000 branch so their wire bytes stay identical to the
+    /// pre-#714 behaviour:
+    /// <list type="bullet">
+    /// <item><see cref="HpsdrBoardKind.Unknown"/> (0xFF) is the disconnected /
+    /// unrecognised sentinel. A future unrecognised Apache board is far likelier
+    /// to be Saturn-family, and pinning the sentinel keeps the wire unchanged if
+    /// discovery ever degrades on a board that is otherwise known-good.</item>
+    /// <item><see cref="HpsdrBoardKind.HermesLite2"/> (0x06) has no Alex filter
+    /// board at all, so these bits are inert; it is pinned rather than moved.</item>
+    /// </list>
+    /// </summary>
+    internal static bool IsClassicAlexBoard(HpsdrBoardKind board) => board is
+        HpsdrBoardKind.Metis        // 0x00 Mercury+Penelope+Metis / Atlas
+        or HpsdrBoardKind.Hermes    // 0x01 Hermes / ANAN-10 / ANAN-100
+        or HpsdrBoardKind.HermesII  // 0x02 ANAN-10E / ANAN-100B
+        or HpsdrBoardKind.Angelia   // 0x04 ANAN-100D (issue #714)
+        or HpsdrBoardKind.Orion;    // 0x05 ANAN-200D (issue #714)
+
     internal static uint ComputeAlexWord(
         uint rxFreqHz,
         uint txFreqHz,
@@ -3576,13 +3705,12 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         bool psEnabled = false)
     {
         uint word = 0;
-        bool classicAlex = board is HpsdrBoardKind.Hermes or HpsdrBoardKind.HermesII;
         bool forceRxBypass = rfFilters is not null
             && (rfFilters.RxBypassAll
                 || (xmit && rfFilters.RxBypassOnTx)
                 || (xmit && psEnabled && rfFilters.RxBypassOnPureSignal));
 
-        word |= classicAlex
+        word |= IsClassicAlexBoard(board)
             ? BpfBitsClassicAlex(rxFreqHz, rfFilters, forceRxBypass)
             : BpfBitsAnan7000(rxFreqHz, rfFilters, forceRxBypass);
         // LPF bit positions and band thresholds are identical across both
@@ -3866,13 +3994,13 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         return psArmed || txActive;
     }
 
-    private void RequestStreamRestartForRecovery(CancellationToken ct)
+    private Task RequestStreamRestartForRecovery(CancellationToken ct)
     {
         if (Interlocked.Exchange(ref _rxRecoveryRestartActive, 1) != 0)
-            return;
+            return Task.CompletedTask;
         Volatile.Write(ref _rxRecoveryRestartSetMs, Environment.TickCount64);
 
-        _ = Task.Run(async () =>
+        return Task.Run(async () =>
         {
             try
             {
@@ -3906,7 +4034,10 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         }, CancellationToken.None);
     }
 
-    private void RxLoop(CancellationToken ct)
+    internal Task RequestStreamRestartForRecoveryForTest(CancellationToken ct) =>
+        RequestStreamRestartForRecovery(ct);
+
+    private void RxLoop(CancellationToken ct, long streamStartTicks, long preclearTicks)
     {
         // Pro-audio promotion (#559): RX carries the PureSignal paired-DDC
         // feedback synchronously into FeedPsFeedbackBlock; at default priority
@@ -3956,6 +4087,7 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
         int toleratedConnectionResets = 0;
         long lastConnectionResetLogMs = 0;
         long lastNonIqErrorLogMs = 0;
+        bool firstInboundPacketPending = true;
 
         try
         {
@@ -4014,6 +4146,22 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
                     HandleRxSilenceRecovery(Environment.TickCount64);
                     continue;
                 }
+
+                // Issue 838 field diagnostic: how long after the start burst the
+                // radio first answered on ANY of its ports. Deliberately placed
+                // after the source-port decode so a malformed or foreign datagram
+                // cannot consume the one-shot and hide continued radio silence.
+                if (firstInboundPacketPending)
+                {
+                    firstInboundPacketPending = false;
+                    long firstPacketTicks = _stopwatch.ElapsedTicks;
+                    _log.LogInformation(
+                        "p2.rx.first_packet srcPort={SrcPort} afterStartMs={AfterStart} preclearBeforeStartMs={PreclearLead}",
+                        srcPort,
+                        (firstPacketTicks - streamStartTicks) * 1000 / Stopwatch.Frequency,
+                        (streamStartTicks - preclearTicks) * 1000 / Stopwatch.Frequency);
+                }
+
                 if (srcPort >= RxDataPortBase && srcPort < RxDataPortBase + MaxRxDdc)
                 {
                     int ddc = srcPort - RxDataPortBase;
@@ -4220,11 +4368,11 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
                         decision.Attempt,
                         decision.MaxAttempts,
                         decision.SilenceMs);
-                    RequestStreamRestartForRecovery(ct);
+                    _ = RequestStreamRestartForRecovery(ct);
                     return;
                 case RxSilenceRecoveryAction.Exhausted:
                     _log.LogWarning(
-                        "p2.rx.recover failed attempts={Max} silenceMs={Silence} - no DDC IQ packets after stream restart attempts; likely network causes include direct-connect/link-local addressing, an isolated switch, DHCP renewal, NIC power management, firewall filtering, or WiFi/Ethernet route selection",
+                        "p2.rx.recover failed attempts={Max} silenceMs={Silence} - the radio may still be sending to a previous session because its stream destination stayed locked while the radio was running; secondary network causes include direct-connect/link-local addressing, an isolated switch, DHCP renewal, NIC power management, firewall filtering, or WiFi/Ethernet route selection",
                         decision.MaxAttempts,
                         decision.SilenceMs);
                     SignalDisconnected("rx-silence");
@@ -4257,7 +4405,8 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
 
         var handler = _widebandFrameHandler;
         if (!_widebandDisplayEnabled || handler is null) return;
-        if (n < 4 + WidebandPayloadBytes)
+        var geometry = WidebandGeometryFor(_boardKind, _variant);
+        if (n < 4 + geometry.PayloadBytes)
         {
             ResetWidebandAssembler();
             return;
@@ -4277,20 +4426,23 @@ public sealed class Protocol2Client : IDisposable, IAsyncDisposable
             return;
         }
 
-        int dst = _widebandPacketIndex * WidebandSamplesPerPacket;
+        int dst = _widebandPacketIndex * geometry.SamplesPerPacket;
         int src = 4;
-        for (int i = 0; i < WidebandSamplesPerPacket; i++, src += 2)
+        for (int i = 0; i < geometry.SamplesPerPacket; i++, src += 2)
             _widebandFrameSamples[dst + i] = BinaryPrimitives.ReadInt16BigEndian(buf.AsSpan(src, 2));
 
         _widebandPacketIndex++;
         _widebandExpectedSeq++;
-        if (_widebandPacketIndex < WidebandPacketsPerFrame) return;
+        if (_widebandPacketIndex < geometry.PacketsPerFrame) return;
 
         _widebandCollecting = false;
         _widebandPacketIndex = 0;
         _widebandExpectedSeq = 0;
-        handler(adcIndex, _widebandFrameSamples, WidebandAdcSampleRateHz);
+        handler(adcIndex, _widebandFrameSamples.AsSpan(0, geometry.FrameSamples), WidebandAdcSampleRateHz);
     }
+
+    internal void HandleWidebandPacketForTest(byte[] packet, int adcIndex = 0) =>
+        HandleWidebandPacket(packet, packet.Length, adcIndex);
 
     private void HandleDdcPacket(byte[] buf, int ddcIndex)
     {

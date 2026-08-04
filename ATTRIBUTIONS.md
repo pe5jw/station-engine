@@ -10,13 +10,13 @@ authoritative list; those headers are a reminder.
 
 **Scope note.** This document covers the Zeus project as a whole. It is also
 copied verbatim into the station-engine corresponding-source export, because
-every engine source file's header points a reader here. In that export some
-paths referenced below — the vendored native sources under `native/`, and
-product components such as `ZeusProduct/` — live in the full Zeus repository
-and are not part of the export; the native libraries they describe are
-conveyed there as built artefacts instead. The authoritative third-party
-inventory for the exported engine, with each component's preserved licence
-text, is `THIRD-PARTY-NOTICES.md` alongside this file.
+every engine source file's header points a reader here. That export includes
+the GPL and permissively licensed native source and build control files used by
+the engine. The proprietary VST3 and Audio Unit bridge sources are excluded and
+are not part of the station engine; product components such as `ZeusProduct/`
+are also outside the export. The authoritative third-party inventory for the
+exported engine, with each component's preserved licence text, is
+`THIRD-PARTY-NOTICES.md` alongside this file.
 
 ## License
 
@@ -27,9 +27,9 @@ the **GNU General Public License, version 2 or (at your option) any later
 version** (GPL-2.0-or-later). The full licence text is in [`LICENSE`](LICENSE).
 
 The Zeus SDR web client under [`zeus-web/`](zeus-web/) and the native VST3 and
-Audio Unit bridges are proprietary and carry the
-`SPDX-License-Identifier: LicenseRef-Proprietary` tag. Their in-tree
-proprietary notice is [`zeus-web/LICENSE`](zeus-web/LICENSE). The proprietary
+Audio Unit bridges are proprietary and carry proprietary per-file license
+identifiers. Their in-tree proprietary notice is
+[`zeus-web/LICENSE`](zeus-web/LICENSE). The proprietary
 client components and station engine are separate programs, and nothing in
 the proprietary notice limits the rights granted under the GPL for the
 station engine.
@@ -124,6 +124,29 @@ to the GPL. Where Zeus references or is informed by a specific Thetis
 source file, any such dual-licensing notice from that file is to be
 preserved in the corresponding Zeus per-file header — not stripped to
 GPL alone.
+
+## SPE Expert 1.5K Taurus amplifier support
+
+The amplifier backend under
+[`Station.Engine.Hosting/SpeTaurus/`](Station.Engine.Hosting/SpeTaurus/) is
+distributed under **GNU General Public License, version 3 or (at your option)
+any later version** (GPL-3.0-or-later). Its detailed source and licensing record
+is preserved in
+[`Station.Engine.Hosting/SpeTaurus/SOURCE.md`](Station.Engine.Hosting/SpeTaurus/SOURCE.md).
+
+Review found substantial source overlap with the GPL-3.0-or-later Taurus
+desktop implementation, which was itself informed by
+[`netjordan/spe-expert-remote`](https://github.com/netjordan/spe-expert-remote).
+The earlier independent/clean-room claim was withdrawn. Relocation into the
+public GPL station engine provides the approved distribution path for that
+provenance. The implementation was also developed with the public
+[SPE Application Programmer's Guide, revision 1.1](https://www.spetlc.com/images/download/SPE_Application_Programmers_Guide.pdf)
+and the [FTDI D2XX Programmer's Guide](https://ftdichip.com/wp-content/uploads/2025/06/D2XX_Programmers_Guide.pdf),
+plus FTDI's public D2XX driver documentation.
+
+The rest of the engine is GPL-2.0-or-later, whose "or later" option permits
+combination with this GPL-3.0-or-later work. The resulting station-engine
+binary is therefore distributed as **GPL-3.0-or-later**.
 
 ## WDSP
 

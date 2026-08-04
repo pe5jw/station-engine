@@ -87,6 +87,12 @@ public interface IProtocol1Client : IDisposable
     /// </summary>
     void SetAdcDitherRandom(bool ditherEnabled, bool randomEnabled);
     void SetAttenuator(HpsdrAtten atten);
+    /// <summary>Route receive attenuation to a physical ADC. Implementations
+    /// that only support ADC0 retain their existing behavior.</summary>
+    void SetAdcAttenuator(byte adc, HpsdrAtten atten)
+    {
+        if (adc == 0) SetAttenuator(atten);
+    }
     void SetAntennaRx(HpsdrAntenna ant);
     /// <summary>
     /// Select the TX antenna relay (ANT1/2/3) — Config-frame C4[1:0], external-
@@ -259,6 +265,10 @@ public interface IProtocol1Client : IDisposable
     /// DspPipelineService to gate the P1 PS feedback pump.
     /// </summary>
     bool PsEnabled { get; }
+
+    /// <summary>Receiver-count request currently carried by the Protocol-1
+    /// Config frame. Exposed for PS feedback-path diagnostics.</summary>
+    byte PsNumReceiversMinusOne => 0;
 
     /// <summary>
     /// Fires (at most once per stall, on the RX thread) when PS is armed on a

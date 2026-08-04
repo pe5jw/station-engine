@@ -36,6 +36,7 @@ public sealed class CatServer : IHostedService, IDisposable
     private readonly TxService _tx;
     private readonly DspPipelineService _pipeline;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly CatIfStateReporter _moxIfReporter;
 
     private readonly ConcurrentDictionary<Guid, CatSession> _clients = new();
     private TcpListener? _listener;
@@ -60,6 +61,11 @@ public sealed class CatServer : IHostedService, IDisposable
         _tx = tx;
         _pipeline = pipeline;
         _loggerFactory = loggerFactory;
+        _moxIfReporter = new CatIfStateReporter(
+            radio,
+            _options.RateLimitMs,
+            Broadcast,
+            _log);
     }
 
     public int ClientCount => _clients.Count;
@@ -202,9 +208,12 @@ public sealed class CatServer : IHostedService, IDisposable
         if (_clients.IsEmpty) return;
         // VFO can fire rapidly during tuning → rate-limit FA and IF.
         BroadcastRateLimited("FA", CatProtocol.Response("FA", CatProtocol.FormatFreq(state.VfoHz)));
+        BroadcastRateLimited("FB", CatProtocol.Response("FB",
+            CatProtocol.FormatFreq(RadioFrequencyResolver.CatVfoBHz(state))));
         Broadcast(CatProtocol.Response("MD", CatProtocol.ModeDigit(state.Mode)));
         BroadcastRateLimited("IF",
-            CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, _tx.IsMoxOn, split: false)));
+            CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, _tx.IsMoxOn,
+                RadioFrequencyResolver.IsSplitEnabledForTx(state))));
     }
 
     internal void BroadcastStateForTest(StateDto state) => OnRadioStateChanged(state);
@@ -212,11 +221,18 @@ public sealed class CatServer : IHostedService, IDisposable
     private void OnMoxChanged(bool moxOn)
     {
         if (_clients.IsEmpty) return;
-        var state = _radio.Snapshot();
-        // TX/RX transition is immediate (not rate-limited) so a logger sees the
-        // edge promptly. IF carries the TX/RX bit.
-        Broadcast(CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, moxOn, split: false)));
+        try
+        {
+            _moxIfReporter.Report(moxOn);
+        }
+        catch (Exception ex)
+        {
+            try { _log.LogDebug(ex, "cat.if.mox.report.failed mox={Mox}", moxOn); }
+            catch { /* CAT diagnostics cannot fault the radio MOX transition. */ }
+        }
     }
+
+    internal void BroadcastMoxForTest(bool moxOn) => OnMoxChanged(moxOn);
 
     private void OnRxMeterUpdated(int channelId, double dbm)
     {
@@ -240,6 +256,7 @@ public sealed class CatServer : IHostedService, IDisposable
 
     public void Dispose()
     {
+        _moxIfReporter.Dispose();
         foreach (var session in _clients.Values) session.Dispose();
         _clients.Clear();
         _acceptCts?.Dispose();

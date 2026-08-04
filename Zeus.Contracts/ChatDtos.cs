@@ -139,7 +139,8 @@ public sealed record ChatRoomDto(
     string Id,
     string Name,
     string Kind,
-    IReadOnlyList<string> Members);
+    IReadOnlyList<string> Members,
+    bool Net = false);
 
 /// <summary>
 /// The local operator's friend graph, mirrored from the relay. <paramref name="Accepted"/>
@@ -151,6 +152,24 @@ public sealed record ChatFriendsDto(
     IReadOnlyList<string> Accepted,
     IReadOnlyList<string> Incoming,
     IReadOnlyList<string> Outgoing);
+
+/// <summary>
+/// One ephemeral friend-to-friend PTT signalling event. <paramref name="Type"/>
+/// is "offer"|"answer"|"key"|"end". The relay stamps
+/// <paramref name="From"/> from the authenticated connection and delivers the
+/// event only to <paramref name="To"/>; no audio or signalling is persisted.
+/// </summary>
+public sealed record ChatPttSignal(
+    string Type,
+    string From,
+    string To,
+    string SessionId,
+    string? Sdp = null,
+    string? Room = null)
+{
+    /// <summary>Maximum accepted WebRTC SDP length, mirrored by the relay.</summary>
+    public const int MaxSdpLength = 64_000;
+}
 
 // ── REST request/response shapes ──────────────────────────────────────────
 
@@ -172,6 +191,14 @@ public sealed record ChatSendRequest(string Text, string? Room = null, ChatAttac
 /// (request / accept / deny / remove) and admin ban/unban.</summary>
 public sealed record ChatFriendRequest(string Callsign);
 
+/// <summary>Send one ephemeral WebRTC/PTT signal to an accepted friend.</summary>
+public sealed record ChatPttRequest(
+    string Type,
+    string To,
+    string SessionId,
+    string? Sdp = null,
+    string? Room = null);
+
 /// <summary>Send a direct message to <paramref name="To"/>.
 /// <paramref name="Attachment"/> is an optional inline photo — when present the
 /// <paramref name="Text"/> may be empty (image-only message).</summary>
@@ -182,6 +209,9 @@ public sealed record ChatRoomCreateRequest(string Name);
 
 /// <summary>Admin: add/remove <paramref name="Callsign"/> to/from <paramref name="Room"/>.</summary>
 public sealed record ChatRoomMemberRequest(string Room, string Callsign);
+
+/// <summary>Admin: enable or disable room-wide PTT for a private group.</summary>
+public sealed record ChatRoomNetRequest(string Room, bool Enabled);
 
 /// <summary>Admin: delete a private group, or request history for a room.</summary>
 public sealed record ChatRoomRequest(string Room);

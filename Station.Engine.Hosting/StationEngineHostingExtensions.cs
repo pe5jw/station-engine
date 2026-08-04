@@ -7,7 +7,9 @@ using Zeus.Protocol1;
 namespace Zeus.Server;
 
 public sealed record StationEngineHostingOptions(
-    bool NativeAudioOutputEnabled = false);
+    bool NativeAudioOutputEnabled = false,
+    string? P2AutoConnectEndpoint = null,
+    IReadOnlyList<string>? LanHttpsUrls = null);
 
 /// <summary>Registers the complete standalone station-engine runtime.</summary>
 public static class StationEngineHostingExtensions
@@ -26,7 +28,9 @@ public static class StationEngineHostingExtensions
 
         services.AddHttpClient();
 
-        services.AddSingleton<StationEngineCapabilitiesService>();
+        services.AddSingleton(provider => new StationEngineCapabilitiesService(
+            provider.GetRequiredService<IConfiguration>(),
+            options.LanHttpsUrls));
         // Windows Firewall status/apply for the Settings control — same
         // service registration as the product host, so the engine's
         // /api/system/windows-firewall routes behave identically.
@@ -53,9 +57,21 @@ public static class StationEngineHostingExtensions
         services.AddSingleton<IProductTxAudioPort>(sp => sp.GetRequiredService<ProductAudioRingPort>());
         services.AddSingleton<ProductPluginAudioPort>();
         services.AddSingleton<ITxAudioPreviewProcessor, NullTxAudioPreviewProcessor>();
-        services.AddSingleton<IExternalReceiverSource, NullExternalReceiverSource>();
-        services.AddSingleton<IExternalReceiverControlPort, NullExternalReceiverControlPort>();
-        services.AddSingleton<IExternalRxAudioSource, NullExternalRxAudioSource>();
+        // KiwiSDR is an engine-owned remote receiver. Register the same concrete
+        // external-receiver ports used by the monolithic host so attach-mode
+        // clients can configure and open the Kiwi slice instead of receiving
+        // 404s from the standalone station engine.
+        // Keep the established zeus-prefs.db ownership so existing saved URLs,
+        // passwords, feature-profile exports, and restores remain intact.
+        services.AddSingleton<KiwiSettingsStore>();
+        services.AddSingleton<KiwiSdrService>();
+        services.AddSingleton<KiwiDirectoryService>();
+        services.AddSingleton<IExternalReceiverSource>(sp =>
+            sp.GetRequiredService<KiwiSdrService>());
+        services.AddSingleton<IExternalReceiverControlPort>(sp =>
+            sp.GetRequiredService<KiwiSdrService>());
+        services.AddSingleton<IExternalRxAudioSource>(sp =>
+            sp.GetRequiredService<KiwiSdrService>());
         services.AddSingleton<IExternalRadioSidecar, NullExternalRadioSidecar>();
         services.AddSingleton<IInitialTxAudioConfigSource, NullInitialTxAudioConfigSource>();
 
@@ -82,6 +98,7 @@ public static class StationEngineHostingExtensions
         services.AddSingleton<Hl2GpioSettingsStore>();
         services.AddSingleton<BandMemoryStore>();
         services.AddSingleton<BandStackStore>();
+        services.AddSingleton<StationFavoriteStore>();
         services.AddSingleton<RfFilterSettingsStore>();
         services.AddSingleton<PttSettingsStore>();
         services.AddSingleton<AudioDeviceSettingsStore>();
@@ -155,9 +172,12 @@ public static class StationEngineHostingExtensions
             Func<TxAudioIngest?> txIngestFactory = () => sp.GetService<TxAudioIngest>();
             return ActivatorUtilities.CreateInstance<DspPipelineService>(sp, txIngestFactory);
         });
+        services.AddProtocol2ConnectionServices();
         services.AddSingleton<FrequencyCalibrationService>();
         services.AddSingleton<ImdMeasureService>();
         services.AddSingleton<TxService>();
+        services.AddSingleton<IInstalledFeatureState, NoInstalledFeatureState>();
+        services.AddSingleton<TuneCarrierCommandCoordinator>();
         services.AddSingleton<TxAudioIngest>();
         services.AddSingleton<TxAudioIngestStartup>();
         services.AddSingleton<TxMicMeterService>();
@@ -175,12 +195,14 @@ public static class StationEngineHostingExtensions
         services.AddSingleton<CwEngine>();
         services.AddSingleton<ExternalPttService>();
         services.AddSingleton<NativeMicCapture>();
+        services.AddSingleton<EngineCacheJanitor>();
 
         // Each hosted registration aliases the singleton used by endpoints
         // and other engine services, so there is exactly one instance of each.
         // Native sources start after the core pipeline and therefore stop
         // before it. This prevents an asynchronous device-open callback from
         // creating a preview DSP engine after shutdown has already begun.
+        services.AddHostedService<EngineCacheJanitorStartup>();
         services.AddHostedService(sp => sp.GetRequiredService<SaturnSpeakerAudioSink>());
         services.AddHostedService(sp => sp.GetRequiredService<WisdomBootstrapService>());
         // Push persisted display settings into the DSP before DspPipelineService
@@ -189,7 +211,15 @@ public static class StationEngineHostingExtensions
         // FFT/wideband/frame-rate/decimation/waterfall settings) is live from
         // boot instead of silently running at defaults until the first edit.
         services.AddHostedService<DisplaySettingsApplyService>();
+        services.AddHostedService(sp => sp.GetRequiredService<KiwiSdrService>());
         services.AddHostedService(sp => sp.GetRequiredService<DspPipelineService>());
+        if (!string.IsNullOrWhiteSpace(options.P2AutoConnectEndpoint))
+        {
+            services.AddSingleton(new P2AutoConnectOptions(options.P2AutoConnectEndpoint));
+            services.AddSingleton<P2AutoConnectService>();
+            services.AddHostedService(sp =>
+                sp.GetRequiredService<P2AutoConnectService>());
+        }
         services.AddHostedService(sp => sp.GetRequiredService<TxAudioIngestStartup>());
         services.AddHostedService(sp => sp.GetRequiredService<TxMicMeterService>());
         services.AddHostedService(sp => sp.GetRequiredService<SignalJammerTxSource>());
@@ -203,6 +233,7 @@ public static class StationEngineHostingExtensions
 
         services.AddTciServices();
         services.AddCatServices();
+        services.AddSpeTaurusServices();
 
         return services;
     }

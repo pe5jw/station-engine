@@ -99,11 +99,22 @@ public static class TxControlEndpoints
         // TUN: internal-tune carrier. Flips SetTXAPostGenRun on WDSP; server-side is
         // where the PRD's drive clamp to min(drive, 25) lives, and where we gate
         // mutual exclusion with MOX so the HL2 sees exactly one of them active.
-        endpoints.MapPost("/api/tx/tun", (TunSetRequest req, TxService tx) =>
+        endpoints.MapPost("/api/tx/tun", async Task<IResult> (
+            TunSetRequest req,
+            TxService tx,
+            [Microsoft.AspNetCore.Mvc.FromServices] TuneCarrierCommandCoordinator coordinator,
+            CancellationToken cancellationToken) =>
         {
-            if (!tx.TrySetTun(req.On, out var err))
-                return Results.Conflict(new { error = err });
-            return Results.Ok(new { tunOn = tx.IsTunOn });
+            var result = await coordinator.SetAsync(req.On, tx, cancellationToken)
+                .ConfigureAwait(false);
+            if (!result.Success)
+            {
+                var body = new { error = result.Error };
+                return result.ExternalFailure
+                    ? Results.Json(body, statusCode: StatusCodes.Status503ServiceUnavailable)
+                    : Results.Conflict(body);
+            }
+            return Results.Ok(new { tunOn = result.TunOn });
         });
 
         endpoints.MapPost("/api/tx/drive", (DriveSetRequest req, RadioService r) =>
@@ -112,7 +123,21 @@ public static class TxControlEndpoints
             if (req.Percent < 0 || req.Percent > 100)
                 return Results.BadRequest(new { error = "percent must be 0..100" });
             r.SetDrive(req.Percent);
-            return Results.Ok(new { drivePercent = req.Percent });
+            return Results.Ok(new { drivePercent = r.Snapshot().DrivePct });
+        });
+
+        endpoints.MapPost("/api/tx/drive-max", (DriveMaxSetRequest req, RadioService r) =>
+        {
+            log.LogInformation("api.tx.drive-max percent={Pct}", req.Percent);
+            if (req.Percent < 1 || req.Percent > 100)
+                return Results.BadRequest(new { error = "percent must be 1..100" });
+            var state = r.SetDriveMaximum(req.Percent);
+            return Results.Ok(new
+            {
+                driveMaxPercent = state.DriveMaxPct,
+                drivePercent = state.DrivePct,
+                tunePercent = state.TunePct,
+            });
         });
 
         return endpoints;
@@ -148,6 +173,44 @@ public static class TxControlEndpoints
         this IEndpointRouteBuilder endpoints)
     {
         var log = endpoints.ServiceProvider.GetRequiredService<ILogger<object>>();
+
+        static IResult GetAudioSuitePreview(RadioService radio, DspPipelineService pipe)
+        {
+            var enabled = radio.Snapshot().TxMonitorEnabled;
+            return Results.Ok(new
+            {
+                supported = true,
+                enabled,
+                meterOnly = enabled && pipe.TxMonitorMeterOnly,
+            });
+        }
+
+        static IResult SetAudioSuitePreview(
+            PreviewSetRequest body,
+            RadioService radio,
+            DspPipelineService pipe)
+        {
+            // Meter-only is requested by Auto Tune so it can run the chain for
+            // metering without the operator hearing the demodulated monitor.
+            // Apply it before flipping the monitor on so the first monitor tick
+            // already honours suppression; clearing on disable is handled by the
+            // monitor latch in DspPipelineService.
+            bool meterOnly = body.Enabled && (body.MeterOnly ?? false);
+            pipe.SetTxMonitorMeterOnly(meterOnly);
+            var state = radio.SetTxMonitor(new TxMonitorSetRequest(body.Enabled));
+            return Results.Ok(new { supported = true, enabled = state.TxMonitorEnabled, meterOnly });
+        }
+
+        // Audio Suite Preview toggle — operator-facing alias for TX Monitor.
+        // It drives the WDSP TX-monitor path, which demodulates post-TXA IQ
+        // back to mono audio after the full transmit chain (Audio Suite/VST
+        // route, leveler, compressor, CFC, ALC, bandpass, CFIR). This keeps
+        // Audio Suite "Preview ON" a 1:1 off-air comparison with what would
+        // reach the radio, rather than the older plugin-chain-only preview.
+        endpoints.MapGet("/api/audio-suite/preview", GetAudioSuitePreview);
+        endpoints.MapPut("/api/audio-suite/preview", SetAudioSuitePreview);
+        endpoints.MapGet("/api/tx-audio-suite/preview", GetAudioSuitePreview);
+        endpoints.MapPut("/api/tx-audio-suite/preview", SetAudioSuitePreview);
 
         // Preview-path toggle. The engine call lives in
         // DspPipelineService.UpdateState so it lands beside the rest of the
@@ -223,3 +286,5 @@ public static class TxControlEndpoints
     }
 
 }
+
+internal sealed record PreviewSetRequest(bool Enabled, bool? MeterOnly = null);

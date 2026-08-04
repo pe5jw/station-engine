@@ -48,6 +48,7 @@ public sealed class CatSerialService : BackgroundService
     private readonly RadioService _radio;
     private readonly TxService _tx;
     private readonly DspPipelineService _pipeline;
+    private readonly CatIfStateReporter _moxIfReporter;
 
     private readonly Slot[] _slots;
 
@@ -76,6 +77,11 @@ public sealed class CatSerialService : BackgroundService
         _radio = radio;
         _tx = tx;
         _pipeline = pipeline;
+        _moxIfReporter = new CatIfStateReporter(
+            radio,
+            _options.RateLimitMs,
+            Broadcast,
+            _log);
         _slots = new Slot[CatSerialDefaults.PortCount];
         for (int i = 0; i < _slots.Length; i++) _slots[i] = new Slot();
         _store.Changed += OnSettingsChanged;
@@ -215,16 +221,26 @@ public sealed class CatSerialService : BackgroundService
     {
         if (!AnyOpen) return;
         BroadcastRateLimited("FA", CatProtocol.Response("FA", CatProtocol.FormatFreq(state.VfoHz)));
+        BroadcastRateLimited("FB", CatProtocol.Response("FB",
+            CatProtocol.FormatFreq(RadioFrequencyResolver.CatVfoBHz(state))));
         Broadcast(CatProtocol.Response("MD", CatProtocol.ModeDigit(state.Mode)));
         BroadcastRateLimited("IF",
-            CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, _tx.IsMoxOn, split: false)));
+            CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, _tx.IsMoxOn,
+                RadioFrequencyResolver.IsSplitEnabledForTx(state))));
     }
 
     private void OnMoxChanged(bool moxOn)
     {
         if (!AnyOpen) return;
-        var state = _radio.Snapshot();
-        Broadcast(CatProtocol.Response("IF", CatProtocol.BuildIfBody(state.VfoHz, state.Mode, moxOn, split: false)));
+        try
+        {
+            _moxIfReporter.Report(moxOn);
+        }
+        catch (Exception ex)
+        {
+            try { _log.LogDebug(ex, "cat.serial.if.mox.report.failed mox={Mox}", moxOn); }
+            catch { /* CAT diagnostics cannot fault the radio MOX transition. */ }
+        }
     }
 
     private void OnRxMeterUpdated(int channelId, double dbm)
@@ -414,6 +430,7 @@ public sealed class CatSerialService : BackgroundService
     public override void Dispose()
     {
         _store.Changed -= OnSettingsChanged;
+        _moxIfReporter.Dispose();
         foreach (var s in _slots)
         {
             s.Live?.Dispose();
