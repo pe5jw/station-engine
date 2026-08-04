@@ -51,13 +51,9 @@ public partial class Program
         {
             Console.Error.WriteLine($"StationEngine: {ex.Message}");
             Console.Error.WriteLine(
-<<<<<<< HEAD
-                "usage: StationEngine --port <1..65535> [--native-audio-output <true|false>] [--bind <ip>] [--webroot <path>]");
-=======
                 "usage: StationEngine --port <1..65535> [--bind <loopback|lan>] " +
                 "[--lan-https-port <1..65535> --product-lan-https-port <1..65535>] " +
                 "[--native-audio-output <true|false>]");
->>>>>>> upstream/main
             diagnosticLogFileSink.Dispose();
             return 2;
         }
@@ -121,10 +117,6 @@ public partial class Program
     public static WebApplication Build(string[] args, DiagnosticLogFileSink? diagnosticLogFileSink)
     {
         var options = ParseOptions(args);
-<<<<<<< HEAD
-        var cmdLineOptions = ParseOptions(args);
-        var port = cmdLineOptions.Port;
-=======
         var port = options.Port;
         var lanCertificate = options.LanHttpsPort is not null
             ? LanCertificate.GetOrCreate()
@@ -139,13 +131,12 @@ public partial class Program
                 .ToArray()
             : Array.Empty<string>();
         PrepareEnginePreferences();
->>>>>>> upstream/main
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = args,
             ContentRootPath = AppContext.BaseDirectory,
-            WebRootPath = string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot) ? null : cmdLineOptions.WebRoot,
+            WebRootPath = string.IsNullOrWhiteSpace(options.WebRoot) ? null : options.WebRoot,
 
         });
         // Self-diagnostic log capture, mirroring the product host (ZeusHost): a
@@ -189,12 +180,6 @@ public partial class Program
         });
         builder.Services.Configure<Microsoft.Extensions.Hosting.HostOptions>(options =>
             options.ShutdownTimeout = TimeSpan.FromSeconds(3));
-<<<<<<< HEAD
-        var bindIp = System.Net.IPAddress.Parse(cmdLineOptions.BindAddress);
-        builder.WebHost.ConfigureKestrel(options =>
-        {
-            options.Listen(bindIp, port);
-=======
         builder.WebHost.ConfigureKestrel(server =>
         {
             if (ListenOnAllInterfaces(options.BindMode, options.LanHttpsPort))
@@ -204,7 +189,6 @@ public partial class Program
             if (options.LanHttpsPort is { } httpsPort && lanCertificate is not null)
                 server.ListenAnyIP(httpsPort, listener => listener.UseHttps(lanCertificate));
             server.ConfigureTciListener(tciEnabled, tciBindAddress, tciPort);
->>>>>>> upstream/main
         });
 
         builder.Services.Configure<JsonOptions>(options =>
@@ -246,9 +230,6 @@ public partial class Program
         var p2AutoConnectEndpoint = Environment.GetEnvironmentVariable(
             P2AutoConnectService.EndpointEnvironmentVariable);
         builder.Services.AddStationEngine(new StationEngineHostingOptions(
-<<<<<<< HEAD
-            NativeAudioOutputEnabled: cmdLineOptions.NativeAudioOutputEnabled));
-=======
             NativeAudioOutputEnabled: options.NativeAudioOutputEnabled,
             P2AutoConnectEndpoint: string.IsNullOrWhiteSpace(p2AutoConnectEndpoint)
                 ? null
@@ -265,7 +246,6 @@ public partial class Program
         // fallback so optional hardware behavior follows the live plugin
         // activation state, including uninstall/deactivation without restart.
         builder.Services.AddSingleton<IInstalledFeatureState, PluginFeatureState>();
->>>>>>> upstream/main
 
         var app = builder.Build();
         if (options.BindMode == StationEngineBindMode.Lan && options.LanHttpsPort is null)
@@ -276,12 +256,12 @@ public partial class Program
                 "(default loopback)");
         }
         app.UseCors(CorsPolicyName);
-        if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
+        if (!string.IsNullOrWhiteSpace(options.WebRoot))
         {
             app.UseStaticFiles();
             app.MapFallbackToFile("index.html");
         }
-        if (!string.IsNullOrWhiteSpace(cmdLineOptions.WebRoot))
+        if (!string.IsNullOrWhiteSpace(options.WebRoot))
         app.UseStationAccessTokenAuthorization(
             Environment.GetEnvironmentVariable(StationAccessTokenEnvironmentVariable));
         app.Use(RejectRemotePluginMutations);
@@ -339,7 +319,6 @@ public partial class Program
         int? productLanHttpsPort = null;
         StationEngineBindMode? bindMode = null;
         bool? nativeAudioOutputEnabled = null;
-        string? bindAddress = null;
         string? webRoot = null;
         for (var index = 0; index < args.Count; index++)
         {
@@ -397,11 +376,6 @@ public partial class Program
                             "--native-audio-output requires true or false");
                     nativeAudioOutputEnabled = enabled;
                     break;
-                case "--bind":
-                    if (++index >= args.Count)
-                        throw new ArgumentException("--bind requires an IP address");
-                    bindAddress = args[index];
-                    break;
                 case "--webroot":
                     if (++index >= args.Count)
                         throw new ArgumentException("--webroot requires a path");
@@ -428,18 +402,11 @@ public partial class Program
                 "--lan-https-port must differ from --product-lan-https-port");
 
         return new StationEngineCommandLineOptions(
-<<<<<<< HEAD
-            Port: port ?? throw new ArgumentException("--port is required"),
-            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false,
-            BindAddress: bindAddress ?? "127.0.0.1",
-            WebRoot: webRoot);
-=======
             Port: resolvedPort,
             BindMode: resolvedBindMode,
             LanHttpsPort: lanHttpsPort,
             ProductLanHttpsPort: productLanHttpsPort,
             NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false);
->>>>>>> upstream/main
     }
 
     internal static bool ListenOnAllInterfaces(
@@ -449,16 +416,11 @@ public partial class Program
 
     internal sealed record StationEngineCommandLineOptions(
         int Port,
-<<<<<<< HEAD
-        bool NativeAudioOutputEnabled,
-        string BindAddress = "127.0.0.1",
-        string? WebRoot = null);
-=======
         StationEngineBindMode BindMode,
         int? LanHttpsPort,
         int? ProductLanHttpsPort,
-        bool NativeAudioOutputEnabled);
->>>>>>> upstream/main
+        bool NativeAudioOutputEnabled,
+        string? WebRoot = null);
 
     private static void PrepareEnginePreferences()
     {

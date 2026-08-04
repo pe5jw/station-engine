@@ -14,13 +14,9 @@ namespace Zeus.Server;
 /// <summary>Maps the standalone station engine's HTTP and WebSocket surface.</summary>
 public static class StationEngineEndpoints
 {
-<<<<<<< HEAD
-    // Modified by PE5JW 2026: removed zeussdr.com remote origins; localhost only.
-=======
     internal const string NativeMicDevOriginEnvironmentVariable =
         "ZEUS_NATIVE_MIC_DEV_ORIGIN";
 
->>>>>>> upstream/main
     internal static readonly HashSet<string> AllowedBrowserOrigins = new(StringComparer.Ordinal)
     {
         // Staging Pages alias for the develop-branch SPA. Production stays
@@ -75,22 +71,6 @@ public static class StationEngineEndpoints
         if (NativeWrapperCorsPolicy.IsAllowedOrigin(origin)) return true;
         if (AllowedBrowserOrigins.Contains(origin)) return true;
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
-<<<<<<< HEAD
-        if (uri.Scheme != Uri.UriSchemeHttp) return false;
-        // Allow loopback and any private LAN IP (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
-        if (uri.Host is "127.0.0.1" or "localhost" or "[::1]" or "::1") return true;
-        if (uri.HostNameType == UriHostNameType.IPv4)
-        {
-            var parts = uri.Host.Split('.');
-            if (parts.Length == 4 && int.TryParse(parts[0], out var a))
-            {
-                if (a == 10) return true;
-                if (a == 192 && parts[1] == "168") return true;
-                if (a == 172 && int.TryParse(parts[1], out var b) && b >= 16 && b <= 31) return true;
-            }
-        }
-        return false;
-=======
         if (uri.Scheme == Uri.UriSchemeHttp && IsLoopbackHost(uri.Host)) return true;
         var allowedScheme = uri.Scheme == Uri.UriSchemeHttp
             ? allowLanSameHost
@@ -186,7 +166,6 @@ public static class StationEngineEndpoints
             && origins.Count == 1
             && origins[0] is { } origin
             && IsNativeMicOriginAllowed(origin, productPort, configuredDevOrigin);
->>>>>>> upstream/main
     }
 
     public static IEndpointRouteBuilder MapStationEngineEndpoints(
