@@ -406,7 +406,8 @@ public partial class Program
             BindMode: resolvedBindMode,
             LanHttpsPort: lanHttpsPort,
             ProductLanHttpsPort: productLanHttpsPort,
-            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false);
+            NativeAudioOutputEnabled: nativeAudioOutputEnabled ?? false,
+            WebRoot: webRoot);
     }
 
     internal static bool ListenOnAllInterfaces(
